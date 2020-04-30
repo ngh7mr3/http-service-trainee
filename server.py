@@ -9,8 +9,9 @@ parser.add_argument('-m', '--mask', type=int, default=24)
 parser.add_argument('-t', '--timeout', type=int, default=120)
 service_settings = parser.parse_args()
 
+tmp_s = bin((2**32-1) & ~(2**(32-service_settings.mask)-1))[2:]
 SERVICE_PORT = service_settings.port
-SERVICE_MASK = [] # list of ints
+SERVICE_MASK = [int(i, 2) for i in [tmp_s[8*j:8*(j+1)] for j in range(4)]]
 SERVICE_TIMEOUT = service_settings.timeout
 
 # TODO:
@@ -21,12 +22,16 @@ SERVICE_TIMEOUT = service_settings.timeout
 # - add docker (?)
 
 async def bitmask_ip(ip: str) -> str:
-	pass
+	ip_bytes = map(int, ip.split('.'))
+	raw_bytes = [str(i&j) for i,j in zip(ip_bytes, SERVICE_MASK)]
+	return '.'.join(raw_bytes)
 
 async def handler(request):
-	#request_ip = request._message.headers['X-Forwarded-For']
-	#print(request._message.headers)
-	#print(request_ip)
+	# assume ip provided with every request
+	request_ip = request._message.headers['X-Forwarded-For']
+	masked_ip = await bitmask_ip(request_ip)
+	print(request._message.headers)
+	print(f"Header IP: {request_ip}, Masked IP: {masked_ip}")
 	return web.Response(text="OK")
 
 async def main():
@@ -37,7 +42,7 @@ async def main():
 	site = web.TCPSite(runner, '0.0.0.0', SERVICE_PORT)
 	await site.start()
 
-	print(f"===== SERVING on http://0.0.0.0:{app_settings.port}/ =====")
+	print(f"===== SERVING on http://0.0.0.0:{SERVICE_PORT}/ =====")
 	await asyncio.sleep(100*3600)
 
 if __name__ == '__main__':
