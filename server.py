@@ -42,6 +42,18 @@ async def bitmask_ip(ip: str) -> str:
 	raw_bytes = [str(i&j) for i,j in zip(ip_bytes, SERVICE_MASK)]
 	return '.'.join(raw_bytes)
 
+async def validate_ip(ip: str):
+	byte_list = ip.split('.')
+
+	if len(byte_list) != 4:
+		return False
+
+	for byte in byte_list:
+		if len(byte)>3 or len(byte)<1 or int(byte)>255 or int(byte)<0:
+			return False
+
+	return True
+
 async def process_request(request: web.BaseRequest, ip: str):
 	masked_ip = await bitmask_ip(ip)
 	print(f"Got request from {masked_ip}")
@@ -86,14 +98,7 @@ async def process_request(request: web.BaseRequest, ip: str):
 			raise web.HTTPBadRequest(text = "Unauthorized")
 
 		# validating given prefix/ip
-		try:
-			byte_list = ip.split('.')
-			if len(byte_list) != 4:
-				raise Exception
-			for byte in byte_list:
-				if len(byte)>3 or len(byte)<1 or int(byte)>255 or int(byte)<0:
-					raise Exception
-		except Exception:
+		if not await validate_ip(subnet_prefix):
 			raise web.HTTPBadRequest(text = "You should provide valid prefix/ip")
 
 		# got valid prefix and valid secret key
@@ -110,6 +115,8 @@ async def handler(request):
 	try:
 		# processing cases when there's only 1 address provided
 		request_ip = request.headers['X-Forwarded-For']
+		if not await validate_ip(request_ip):
+			raise web.HTTPBadRequest(text = "Bad ip provided in header")
 	except KeyError:
 		print("Got header without forwarded ip")
 		ans = "Can't find any IP provided in X-Forwarded-For header"
@@ -121,7 +128,7 @@ async def main():
 	server = web.Server(handler)
 	runner = web.ServerRunner(server)
 	await runner.setup()
-
+	
 	site = web.TCPSite(runner, SERVICE_IP, SERVICE_PORT)
 	await site.start()
 
