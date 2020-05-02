@@ -20,22 +20,20 @@ SERVICE_PORT = service_settings.port
 SERVICE_MASK = [int(i, 2) for i in [tmp_s[8*j:8*(j+1)] for j in range(4)]]
 SERVICE_TIMEOUT = service_settings.timeout
 MAX_REQUESTS= service_settings.requests
+SECRET_KEY = 'foobar' # hardcoded keys aren't the best practice
 
 # using default redis-server at localhost:6379
 REDIS_SESSION = redis.Redis(db=1) 
 REDIS_TIMEOUT = redis.Redis(db=2)
 
+PATHS = ['/foo', '/bar', '/foobar']
 HTMLBody200 = responses.HTMLResponse200()
+HTMLBody404 = responses.HTMLResponse404()
 HTMLBody429 = responses.HTMLResponse429(MAX_REQUESTS)
-# temporary headers, will refactor them later
-HTTPHeader200 = CIMultiDict()
-HTTPHeader200['Content-Type'] = 'text/html'
 HTTPHeader429 = CIMultiDict()
 HTTPHeader429['Content-Type'] = 'text/html'
 
 # TODO:
-# - create RFC 429 HTTP answer with html body
-# - add handler to clear timeout for specifix prefix
 # - add tests (pytest-aiohttp)
 # - add docker (?)
 
@@ -44,7 +42,7 @@ async def bitmask_ip(ip: str) -> str:
 	raw_bytes = [str(i&j) for i,j in zip(ip_bytes, SERVICE_MASK)]
 	return '.'.join(raw_bytes)
 
-async def process_ip(ip: str):
+async def process_request(request: web.BaseRequest, ip: str):
 	masked_ip = await bitmask_ip(ip)
 	print(f"Got request from {masked_ip}")
 
@@ -71,17 +69,53 @@ async def process_ip(ip: str):
 	else:
 		print(f"New IP or last session expired")
 		REDIS_SESSION.setex(masked_ip, 60, MAX_REQUESTS-1)
-	
-	return web.HTTPOk(body = str(HTMLBody200), headers = HTTPHeader200)
-	
+
+	if request.path in PATHS:
+		# here should be route hadler aka RouteDef
+		return web.HTTPOk(body = str(HTMLBody200), content_type = 'text/html')
+	elif request.path == '/reset-timeout':
+		try:
+			key = request.query['key']
+			subnet_prefix = request.query['ip']
+		except KeyError:
+			raise web.HTTPBadRequest(text = "Provide subnet prefix "
+											"(or ip from specific subnet) "
+											"and secret key to reset timeout. "
+											"Ex.: /reset-timeout?key=foo&ip=1.2.3.4")
+		if key != SECRET_KEY:
+			raise web.HTTPBadRequest(text = "Unauthorized")
+
+		# validating given prefix/ip
+		try:
+			byte_list = ip.split('.')
+			if len(byte_list) != 4:
+				raise Exception
+			for byte in byte_list:
+				if len(byte)>3 or len(byte)<1 or int(byte)>255 or int(byte)<0:
+					raise Exception
+		except Exception:
+			raise web.HTTPBadRequest(text = "You should provide valid prefix/ip")
+
+		# got valid prefix and valid secret key
+		masked_prefix = await bitmask_ip(subnet_prefix)
+		if masked_prefix in REDIS_TIMEOUT:
+			del REDIS_TIMEOUT[masked_prefix]
+			return web.HTTPOk(body = str(HTMLBody200), content_type = 'text/html')
+		else:
+			raise web.HTTPBadRequest(text = "Provided prefix isn't timed out")
+	else:
+		raise web.HTTPNotFound(body = str(HTMLBody404), content_type = 'text/html')
+
 async def handler(request):
 	try:
-		request_ip = request._message.headers['X-Forwarded-For']
+		# processing cases when there's only 1 address provided
+		request_ip = request.headers['X-Forwarded-For']
 	except KeyError:
 		print("Got header without forwarded ip")
-		request_ip = '0.0.0.0'
+		ans = "Can't find any IP provided in X-Forwarded-For header"
+		raise web.HTTPBadRequest(text = ans)
 
-	return await process_ip(request_ip)
+	return await process_request(request, request_ip)
 
 async def main():
 	server = web.Server(handler)
