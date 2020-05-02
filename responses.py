@@ -17,6 +17,13 @@ class HTMLResponse200(SimpleHTMLBody):
 		self.p = "Any static content could be provided here"
 		super().__init__(self.title, self.h1, self.p)
 
+class HTMLResponse404(SimpleHTMLBody):
+	def __init__(self):
+		self.title = "Not Found"
+		self.h1 = self.title
+		self.p = "Page not found. Try another page."
+		super().__init__(self.title, self.h1, self.p)
+
 class HTMLResponse429(SimpleHTMLBody):
 	def __init__(self, max_requests):
 		self.title = "Too Many Requests"
