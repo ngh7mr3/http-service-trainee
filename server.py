@@ -33,10 +33,6 @@ HTMLBody429 = responses.HTMLResponse429(MAX_REQUESTS)
 HTTPHeader429 = CIMultiDict()
 HTTPHeader429['Content-Type'] = 'text/html'
 
-# TODO:
-# - add tests (pytest-aiohttp)
-# - add docker (?)
-
 async def bitmask_ip(ip: str) -> str:
 	ip_bytes = map(int, ip.split('.'))
 	raw_bytes = [str(i&j) for i,j in zip(ip_bytes, SERVICE_MASK)]

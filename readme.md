@@ -17,4 +17,21 @@ Service should provide any static content without limiting.
 - Test coverage
 - Start up the service by 'docker-compose up'
 - Include subnet size, rate limit and timeout at service start
-- External(?) handler for manual reset any limits by subnet prefix
+- Handler for manual resetting any limits by subnet prefix
+
+## Done
+
+- Implemented raw aiohttp server with Redis
+- Created basic logic for rate limiting
+- Added possibility to include subnet size, rate limit, port and timeout at service start
+- Created primitive handler to reset any limiting by subnet prefix
+- Covered service code with small tests with pytest-aiohttp
+
+## TODO
+
+- Start up service with 'docker-compose up'
+- Style all code in PEP 8
+- Add custom route handler aka RouteDef with aiohttp.web.Application
+- Reimplement timeout reset handler: providing secret keys in plain text isn't safe enough (use cookies or something else?)
+- Create separate class for internal service settings (using global variables isn't best practice)
+
