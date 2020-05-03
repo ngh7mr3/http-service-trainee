@@ -43,14 +43,17 @@ async def bitmask_ip(ip: str) -> str:
 	return '.'.join(raw_bytes)
 
 async def validate_ip(ip: str):
-	byte_list = ip.split('.')
+	try:
+		byte_list = ip.split('.')
 
-	if len(byte_list) != 4:
-		return False
-
-	for byte in byte_list:
-		if len(byte)>3 or len(byte)<1 or int(byte)>255 or int(byte)<0:
+		if len(byte_list) != 4:
 			return False
+
+		for byte in byte_list:
+			if len(byte)>3 or len(byte)<1 or int(byte)>255 or int(byte)<0:
+				return False
+	except Exception:
+		return False
 
 	return True
 
