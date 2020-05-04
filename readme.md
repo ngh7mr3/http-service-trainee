@@ -65,4 +65,4 @@ See `./server.py -h` for more details.
 - Add custom route handler aka RouteDef with aiohttp.web.Application
 - Reimplement timeout reset handler: providing secret keys in plain text isn't safe enough (use cookies or something else?)
 - Create separate class for internal service settings (using global variables isn't best practice)
-
+- Refactor all with aiohttp.web.Application + middleware
