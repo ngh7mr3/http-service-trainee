@@ -6,42 +6,14 @@ import argparse
 import redis
 import responses
 
-parser = argparse.ArgumentParser()
-parser.add_argument('-p', '--port', type=int, default=8080)
-parser.add_argument('-m', '--mask', type=int, default=24)
-parser.add_argument('-t', '--timeout', type=int, default=120)
-parser.add_argument('-r', '--requests', type=int, default=100)
-service_settings = parser.parse_args()
-
-# main service settings
-tmp_s = bin((2**32-1) & ~(2**(32-service_settings.mask)-1))[2:]
-SERVICE_IP = '127.0.0.1'
-SERVICE_PORT = service_settings.port
-SERVICE_MASK = [int(i, 2) for i in [tmp_s[8*j:8*(j+1)] for j in range(4)]]
-SERVICE_TIMEOUT = service_settings.timeout
-MAX_REQUESTS= service_settings.requests
-SECRET_KEY = 'foobar' # hardcoded keys aren't the best practice
-
-# using default redis-server at localhost:6379
-REDIS_SESSION = redis.Redis(db=1) 
-REDIS_TIMEOUT = redis.Redis(db=2)
-
-PATHS = ['/foo', '/bar', '/foobar']
-HTMLBody200 = responses.HTMLResponse200()
-HTMLBody404 = responses.HTMLResponse404()
-HTMLBody429 = responses.HTMLResponse429(MAX_REQUESTS)
-HTTPHeader429 = CIMultiDict()
-HTTPHeader429['Content-Type'] = 'text/html'
-
-async def bitmask_ip(ip: str) -> str:
+async def bitmask_ip(ip_bytes, mask_bytes):
 	ip_bytes = map(int, ip.split('.'))
-	raw_bytes = [str(i&j) for i,j in zip(ip_bytes, SERVICE_MASK)]
+	raw_bytes = [str(i&j) for i,j in zip(ip_bytes, mask_bytes)]
 	return '.'.join(raw_bytes)
 
 async def validate_ip(ip: str):
 	try:
-		byte_list = ip.split('.')
-
+		byte_list = map(int, ip.split('.'))
 		if len(byte_list) != 4:
 			return False
 
@@ -51,93 +23,121 @@ async def validate_ip(ip: str):
 	except Exception:
 		return False
 
-	return True
+	return byte_list
 
-async def process_request(request: web.BaseRequest, ip: str):
-	masked_ip = await bitmask_ip(ip)
-	print(f"Got request from {masked_ip}")
+async def content_handler(request):
+	_body = request.app['html_body_200']
+	return web.HTTPOk(body = _body, content_type = 'text/html')
 
-	current_timeout = REDIS_TIMEOUT.ttl(masked_ip)
-
-	if current_timeout > -1:
-		print(f"Seems like IP {masked_ip} is still timed out for {current_timeout}")
-		HTTPHeader429['Retry-After'] = str(current_timeout)
-		return web.HTTPTooManyRequests(body = str(HTMLBody429), 
-									headers = HTTPHeader429)
-	elif masked_ip in REDIS_SESSION:
-		if REDIS_SESSION.decrby(masked_ip, 1) < 0:
-			print(f"{masked_ip} exceeded rate limit and got timeout...")
-			REDIS_TIMEOUT.setex(masked_ip, SERVICE_TIMEOUT, 1)
-
-			# clear user session for case timeout ttl < session ttl
-			del REDIS_SESSION[masked_ip]
-
-			HTTPHeader429['Retry-After'] = str(SERVICE_TIMEOUT)
-			return web.HTTPTooManyRequests(body = str(HTMLBody429), 
-										headers = HTTPHeader429)
-		else:
-			print(f"Everything is ok with {masked_ip}, processing request...")
-	else:
-		print(f"New IP or last session expired")
-		REDIS_SESSION.setex(masked_ip, 60, MAX_REQUESTS-1)
-
-	if request.path in PATHS:
-		# here should be route hadler aka RouteDef
-		return web.HTTPOk(body = str(HTMLBody200), content_type = 'text/html')
-	elif request.path == '/reset-timeout':
-		try:
-			key = request.query['key']
-			subnet_prefix = request.query['ip']
-		except KeyError:
-			raise web.HTTPBadRequest(text = "Provide subnet prefix "
-											"(or ip from specific subnet) "
-											"and secret key to reset timeout. "
-											"Ex.: /reset-timeout?key=foo&ip=1.2.3.4")
-		if key != SECRET_KEY:
-			raise web.HTTPBadRequest(text = "Unauthorized")
-
-		# validating given prefix/ip
-		if not await validate_ip(subnet_prefix):
-			raise web.HTTPBadRequest(text = "You should provide valid prefix/ip")
-
-		# got valid prefix and valid secret key
-		masked_prefix = await bitmask_ip(subnet_prefix)
-		if masked_prefix in REDIS_TIMEOUT:
-			del REDIS_TIMEOUT[masked_prefix]
-			return web.HTTPOk(body = str(HTMLBody200), content_type = 'text/html')
-		else:
-			raise web.HTTPBadRequest(text = "Provided prefix isn't timed out")
-	else:
-		raise web.HTTPNotFound(body = str(HTMLBody404), content_type = 'text/html')
-
-async def handler(request):
+async def reset_timeout_handler(request):
 	try:
-		# processing cases when there's only 1 address provided
-		request_ip = request.headers['X-Forwarded-For']
-		if not await validate_ip(request_ip):
+		key = request.query['key']
+		ip  = request.query['ip']
+	except KeyError:
+		raise web.HTTPBadRequest(text = "Provide subnet prefix "
+								"(or ip from specific subnet) "
+								"and secret key to reset timeout. "
+								"Ex.: /reset_timeout?key=foo&ip=1.2.3.4")
+	# validating secret key
+	if key != request.app['secret_key']:
+		raise web.HTTPBadRequest(text = "Unauthorized")
+
+	# validating given prefix/ip
+	ip = await validate_ip(ip)
+	if ip == False:
+		raise web.HTTPBadRequest(text = "You should provide valid prefix/ip")
+	
+	# got valid prefix and valid secret key
+	masked_prefix = await bitmask_ip(subnet_prefix)
+	REDIS_TIMEOUT = request.app['timeout_db']
+
+	if masked_prefix in REDIS_TIMEOUT:
+		del REDIS_TIMEOUT[masked_prefix]
+		return web.HTTPOk(text = "OK")
+	else:
+		raise web.HTTPBadRequest(text = "Provided prefix isn't timed out")
+
+@web.middleware
+async def ip_checkpoint(request, handler):
+	# processing cases with only 1 ip address provided
+	try:
+		request_ip = await validate_ip(request.headers['X-Forwarded-For'])
+		if request_ip == False:
 			raise web.HTTPBadRequest(text = "Bad ip provided in header")
 	except KeyError:
 		print("Got header without forwarded ip")
 		ans = "Can't find any IP provided in X-Forwarded-For header"
 		raise web.HTTPBadRequest(text = ans)
-
-	return await process_request(request, request_ip)
-
-async def main():
-	server = web.Server(handler)
-	runner = web.ServerRunner(server)
-	await runner.setup()
 	
-	site = web.TCPSite(runner, SERVICE_IP, SERVICE_PORT)
-	await site.start()
+	masked_ip = await bitmask_ip(request_ip, request.app['mask'])
+	print(f"Got request from {masked_ip}")
 
-	print(f"===== SERVING on http://{SERVICE_IP}:{SERVICE_PORT}/ =====")
-	await asyncio.sleep(100*3600)
+	REDIS_SESSION = request.app['session_db']
+	REDIS_TIMEOUT = request.app['timeout_db']
+
+	current_timeout = REDIS_TIMEOUT.ttl(masked_ip)
+
+	_body = request.app['html_body_429']
+	_header = request.app['http-header']
+
+	if current_timeout > -1:
+		print(f"Seems like IP {masked_ip} is still timed out for {current_timeout}")
+		_header['Retry-After'] = str(current_timeout)
+		raise web.HTTPTooManyRequests(body = str(_body), headers = _header)
+
+	elif masked_ip in REDIS_SESSION:
+		if REDIS_SESSION.decrby(masked_ip, 1) < 0:
+			print(f"{masked_ip} exceeded rate limit and got timeout...")
+			REDIS_TIMEOUT.setex(masked_ip, request.app['timeout'], 1)
+
+			# clear user session for case timeout ttl < session ttl
+			del REDIS_SESSION[masked_ip]
+
+			_header['Retry-After'] = str(request.app['timeout'])
+			raise web.HTTPTooManyRequests(body = str(_body), headers = _header)
+	else:
+		print(f"New IP or last session expired")
+		REDIS_SESSION.setex(masked_ip, 60, request.app['max_requests']-1)
+
+	return await handler(request)
+
+def initialize_app(app : web.Application, port : int, mask : int, 
+				timeout : int, max_requests : int, 
+				redis_session_db : int, redis_timeout_db : int):
+	# main settings
+	app['port'] = port
+
+	# store mask as list of integers ex. [255, 255, 255, 0]
+	tmp_s = bin((1<<32) - (1<<32>>mask))[2:]
+	app['mask'] = [int(i, 2) for i in [tmp_s[8*j:8*(j+1)] for j in range(4)]]
+
+	app['timeout'] = timeout
+	app['max_requests'] = max_requests
+	app['session_db'] = redis.Redis(db = redis_session_db)
+	app['timeout_db'] = redis.Redis(db = redis_timeout_db)
+
+	# static utils
+	app['html_body_200'] = responses.HTMLResponse200()
+	app['html_body_429'] = responses.HTMLResponse429(max_requests)
+	app['http_header'] = CIMultiDict()
+	app['http_header']['Content-Type'] = 'text/html'
+	app['secret_key'] = 'secret_key'
+
+app = web.Application(middlewares = [ip_checkpoint])
+app.add_routes([web.route('*', '/foo', content_handler),
+			web.route('*', '/bar', content_handler),
+			web.route('*', '/content', content_handler)])
+app.add_routes([web.get('/reset_timeout?ip={ip}&key={key}', reset_timeout_handler)])
 
 if __name__ == '__main__':
-	loop = asyncio.get_event_loop()
-	try:
-		loop.run_until_complete(main())
-	except KeyboardInterrupt:
-		pass
-	loop.close()
+	parser = argparse.ArgumentParser()
+	parser.add_argument('-p', '--port', type=int, default=8080)
+	parser.add_argument('-m', '--mask', type=int, default=24)
+	parser.add_argument('-t', '--timeout', type=int, default=120)
+	parser.add_argument('-r', '--requests', type=int, default=100)
+	svc_settings = parser.parse_args()
+	
+	# we will use 1st and 2nd redis db for 'production'
+	initialize_app(app, *(vars(svc_settings).values()), 1, 2)
+
+	web.run_app(app, port = app['port'])
