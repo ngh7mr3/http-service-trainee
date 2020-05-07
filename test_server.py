@@ -10,22 +10,26 @@ from aiohttp import web
 # Subnet prefix = 255.255.255.0
 
 # We will use another dbs, instead of 'production' db=1 and db=2
-# Let's reassign them in the server module and create new handle
-REDIS_SESSION = redis.Redis(db=3)
-REDIS_TIMEOUT = redis.Redis(db=4)
-server.REDIS_SESSION = REDIS_SESSION
-server.REDIS_TIMEOUT = REDIS_TIMEOUT
+REDIS_SESSION = 0
+REDIS_TIMEOUT = 0
+PATHS = ['/foo', '/bar', '/content']
+
+# main service settings: port, mask, timeout, max_requests
+svc_settings = [8080, 24, 120, 100]
+mask = [255, 255, 255, 0]
 
 async def flush_db():
 	REDIS_SESSION.flushdb()
 	REDIS_TIMEOUT.flushdb()
 
 @pytest.fixture
-async def cli(aiohttp_client, aiohttp_raw_server):
-	app = await aiohttp_raw_server(server.handler)
-	client = await aiohttp_client(app)
+async def cli(aiohttp_client):
+	global REDIS_SESSION, REDIS_TIMEOUT
+	app = server.initialize_app(*svc_settings, 3, 4)
+	REDIS_SESSION = app['session_db']
+	REDIS_TIMEOUT = app['timeout_db']
 	await flush_db()
-	return client
+	return await aiohttp_client(app)
 
 async def test_without_provided_header(cli):
 	resp = await cli.get('/')
@@ -50,9 +54,9 @@ async def test_with_invalid_header(cli):
 	assert resp.status == 400
 
 async def test_with_valid_header(cli):
-	ip = '1.2.3.4'
-	masked_ip = await server.bitmask_ip(ip)
-	header = {'X-Forwarded-For': ip}
+	ip = [1,2,3,4]
+	masked_ip = await server.bitmask_ip(ip, mask)
+	header = {'X-Forwarded-For': '1.2.3.4'}
 
 	resp = await cli.get('/', headers = header)
 	assert resp.status == 404
@@ -67,18 +71,19 @@ async def test_with_valid_header(cli):
 	assert masked_ip not in REDIS_TIMEOUT
 
 async def test_ips_from_different_subnets(cli):
-	ips = ['1.1.1.1', '1.1.2.1', '1.2.1.1', '2.1.1.1']
-	masked_ips = [await server.bitmask_ip(ip) for ip in ips]
+	ips = [[1,1,1,1], [1,1,2,1], [1,2,1,1], [2,1,1,1]]
+	masked_ips = [await server.bitmask_ip(ip, mask) for ip in ips]
 	
-	ok_url_pack = server.PATHS
+	ok_url_pack = PATHS
 	not_found_url_pack = ['/', '/test', '/admin']
 	packs = [(200, ok_url_pack), (404, not_found_url_pack)]
 	
 	for ip, masked_ip in zip(ips, masked_ips):
+		_ip = '.'.join(map(str, ip))
 		for code, url_pack in packs:
 			for url in url_pack:
 				#ok, this looks terrible, I know
-				resp = await cli.get(url, headers = {'X-Forwarded-For' : ip})
+				resp = await cli.get(url, headers = {'X-Forwarded-For' : _ip})
 				assert resp.status == code
 		# after getting 3 200s and 3 404s
 		# ip from current subnet should be able
@@ -90,7 +95,7 @@ async def test_ips_from_one_subnet(cli):
 	ips = ['1.2.3.100', '1.2.3.255', '1.2.3.0', '1.2.3.4']
 	masked_ip = '1.2.3.0'
 	
-	ok_url_pack = server.PATHS
+	ok_url_pack = PATHS
 	not_found_pack = ['/', '/set', 'test']
 	packs = [(200, ok_url_pack), (404, not_found_pack)]
 
@@ -118,7 +123,7 @@ async def test_timeout_for_one_ip(cli):
 	# after 101st request we should get timeout for 120 seconds
 	resp = await cli.get(url, headers = {'X-Forwarded-For' : ip})
 	assert resp.status == 429
-	assert resp._headers['Retry-After'] == str(server.SERVICE_TIMEOUT)
+	assert resp._headers['Retry-After'] == str(cli.server.app['timeout'])
 
 async def test_timeout_for_one_subnet(cli):
 	ips = ['1.2.3.100', '1.2.3.255', '1.2.3.0', '1.2.3.4']
@@ -160,9 +165,9 @@ async def test_timeout_for_mixed_subnets(cli):
 
 async def test_timeout_reset_query(cli):
 	header = {'X-Forwarded-For' : '1.2.3.4'}
-	url = '/reset-timeout'
-	key = server.SECRET_KEY
-	bad_key = 'badKey'
+	url = '/reset_timeout'
+	key = cli.server.app['secret_key']
+	bad_key = 'bad_key'
 	subnet = '1.1.1.1'
 	bad_subnet = '1.a.asd.0001'
 
@@ -188,7 +193,7 @@ async def test_timeout_reset_query(cli):
 	assert resp.status == 400
 
 	# timeout given subnet
-	REDIS_TIMEOUT.setex('1.1.1.0', server.SERVICE_TIMEOUT, 1)
+	REDIS_TIMEOUT.setex('1.1.1.0', cli.server.app['timeout'], 1)
 	# trying to request something
 	resp = await cli.get('/',headers = {'X-Forwarded-For' : subnet})
 	assert resp.status == 429
@@ -199,4 +204,3 @@ async def test_timeout_reset_query(cli):
 	# trying to request after resetting timeout
 	resp = await cli.get('/foo', headers = {'X-Forwarded-For' : subnet})
 	assert resp.status == 200
-
