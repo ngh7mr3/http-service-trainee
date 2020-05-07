@@ -7,13 +7,12 @@ import redis
 import responses
 
 async def bitmask_ip(ip_bytes, mask_bytes):
-	ip_bytes = map(int, ip.split('.'))
 	raw_bytes = [str(i&j) for i,j in zip(ip_bytes, mask_bytes)]
 	return '.'.join(raw_bytes)
 
 async def validate_ip(ip: str):
 	try:
-		byte_list = map(int, ip.split('.'))
+		byte_list = ip.split('.')
 		if len(byte_list) != 4:
 			return False
 
@@ -23,11 +22,11 @@ async def validate_ip(ip: str):
 	except Exception:
 		return False
 
-	return byte_list
+	return map(int, byte_list)
 
 async def content_handler(request):
 	_body = request.app['html_body_200']
-	return web.HTTPOk(body = _body, content_type = 'text/html')
+	return web.HTTPOk(body = str(_body), content_type = 'text/html')
 
 async def reset_timeout_handler(request):
 	try:
@@ -43,12 +42,12 @@ async def reset_timeout_handler(request):
 		raise web.HTTPBadRequest(text = "Unauthorized")
 
 	# validating given prefix/ip
-	ip = await validate_ip(ip)
-	if ip == False:
+	prefix = await validate_ip(ip)
+	if prefix == False:
 		raise web.HTTPBadRequest(text = "You should provide valid prefix/ip")
 	
 	# got valid prefix and valid secret key
-	masked_prefix = await bitmask_ip(subnet_prefix)
+	masked_prefix = await bitmask_ip(prefix, request.app['mask'])
 	REDIS_TIMEOUT = request.app['timeout_db']
 
 	if masked_prefix in REDIS_TIMEOUT:
@@ -61,9 +60,10 @@ async def reset_timeout_handler(request):
 async def ip_checkpoint(request, handler):
 	# processing cases with only 1 ip address provided
 	try:
-		request_ip = await validate_ip(request.headers['X-Forwarded-For'])
+		_ip = request.headers['X-Forwarded-For']
+		request_ip = await validate_ip(_ip)
 		if request_ip == False:
-			raise web.HTTPBadRequest(text = "Bad ip provided in header")
+			raise web.HTTPBadRequest(text = f"Bad ip provided in header: {_ip}")
 	except KeyError:
 		print("Got header without forwarded ip")
 		ans = "Can't find any IP provided in X-Forwarded-For header"
@@ -78,7 +78,7 @@ async def ip_checkpoint(request, handler):
 	current_timeout = REDIS_TIMEOUT.ttl(masked_ip)
 
 	_body = request.app['html_body_429']
-	_header = request.app['http-header']
+	_header = request.app['http_header']
 
 	if current_timeout > -1:
 		print(f"Seems like IP {masked_ip} is still timed out for {current_timeout}")
@@ -101,9 +101,15 @@ async def ip_checkpoint(request, handler):
 
 	return await handler(request)
 
-def initialize_app(app : web.Application, port : int, mask : int, 
-				timeout : int, max_requests : int, 
-				redis_session_db : int, redis_timeout_db : int):
+def initialize_app(port : int, mask : int, timeout : int, 
+	max_requests : int, redis_session_db : int, redis_timeout_db : int):
+	
+	app = web.Application(middlewares = [ip_checkpoint])
+	app.add_routes([web.route('*', '/foo', content_handler),
+				web.route('*', '/bar', content_handler),
+				web.route('*', '/content', content_handler)])
+	app.add_routes([web.get('/reset_timeout', reset_timeout_handler)])
+
 	# main settings
 	app['port'] = port
 
@@ -123,11 +129,7 @@ def initialize_app(app : web.Application, port : int, mask : int,
 	app['http_header']['Content-Type'] = 'text/html'
 	app['secret_key'] = 'secret_key'
 
-app = web.Application(middlewares = [ip_checkpoint])
-app.add_routes([web.route('*', '/foo', content_handler),
-			web.route('*', '/bar', content_handler),
-			web.route('*', '/content', content_handler)])
-app.add_routes([web.get('/reset_timeout?ip={ip}&key={key}', reset_timeout_handler)])
+	return app
 
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser()
@@ -138,6 +140,6 @@ if __name__ == '__main__':
 	svc_settings = parser.parse_args()
 	
 	# we will use 1st and 2nd redis db for 'production'
-	initialize_app(app, *(vars(svc_settings).values()), 1, 2)
+	app = initialize_app(*(vars(svc_settings).values()), 1, 2)
 
 	web.run_app(app, port = app['port'])
