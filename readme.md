@@ -61,9 +61,9 @@ See `$ ./server.py -h` for more details.
 - Added possibility to include subnet size, rate limit, port and timeout at service start
 - Created primitive handler to reset any limiting by subnet prefix
 - Covered service code with small tests with pytest-aiohttp
+- Styled all code with pep8 rules using pycodestyle and black
 
 ## TODO
 
 - Start up service with 'docker-compose up'
-- Style all code in PEP 8
 - Reimplement timeout reset handler: providing secret keys in plain text isn't safe enough (use cookies or something else?)
